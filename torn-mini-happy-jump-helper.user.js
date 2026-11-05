@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Mini Happy Jump Assistant
 // @namespace    https://github.com/jascheri/Torn-Mini-Happy-Jump-Helper
-// @version      9.13
+// @version      9.14
 // @description  Mini Happy Jump planner with inventory tracking, cooldown guidance, and multi-tab sync.
 // @author       You
 // @match        https://www.torn.com/*
@@ -503,29 +503,28 @@
 		return `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
 	}
 
+	// Only problems or setup hints are shown in the panel header; live values appear beside the related action items.
 	function renderApiStatusHtml() {
 		if (apiState.error) {
 			return `<div style="font-size:10px; color:#f44336; margin-bottom:6px;">${apiState.error}</div>`;
 		}
 		if (!apiKey) {
-			return '<div style="font-size:10px; color:#aaa; margin-bottom:6px;">Add a Torn API key in ⚙️ to show drug cooldown and energy.</div>';
+			return '<div style="font-size:10px; color:#aaa; margin-bottom:6px;">Add a Torn API key in ⚙️ to show drug cooldown and energy beside the current step.</div>';
 		}
-		if (apiState.error) {
-			return `<div style="font-size:10px; color:#f44336; margin-bottom:6px;">${apiState.error}</div>`;
-		}
-		if (!apiState.fetchedAt) {
-			return '<div style="font-size:10px; color:#aaa; margin-bottom:6px;">Loading cooldown…</div>';
-		}
+		return '';
+	}
+
+	// kind: 'xan' shows the shared drug cooldown plus energy-full time; 'ext' shows the drug cooldown only.
+	function cooldownBadgeHtml(kind) {
+		if (!apiKey || !apiState.fetchedAt) return '';
 		const now = Date.now();
 		const drugLeft = apiState.drugEnd - now;
-		const energyLeft = apiState.energyFullAt - now;
-		const drugHtml = drugLeft > 0 ? `<span class="mhj-expired">${formatDuration(drugLeft)}</span>` : '<span class="mhj-ok">Ready</span>';
-		const energyHtml = energyLeft > 0 ? `<span style="color:#ffca28;">${formatDuration(energyLeft)} to full</span>` : '<span class="mhj-ok">Full</span>';
-		return `
-            <div class="mhj-row" style="font-size:11px; background:#222; padding:4px; border-radius:4px;">
-                <span>💊 Drug CD: ${drugHtml}</span>
-                <span>⚡ ${energyHtml}</span>
-            </div>`;
+		let html = drugLeft > 0 ? `<span class="mhj-expired">💊 CD ${formatDuration(drugLeft)}</span>` : '<span class="mhj-ok">💊 Ready</span>';
+		if (kind === 'xan') {
+			const energyLeft = apiState.energyFullAt - now;
+			html += energyLeft > 0 ? ` <span style="color:#ffca28;">⚡ ${formatDuration(energyLeft)} to full</span>` : ' <span class="mhj-ok">⚡ Full</span>';
+		}
+		return html;
 	}
 
 	GM_addValueChangeListener('torn_mhj_data', function (name, old_value, new_value, remote) {
@@ -847,6 +846,11 @@
 			insEl.textContent = ins.text;
 		}
 		if (apiEl) apiEl.innerHTML = renderApiStatusHtml();
+		if (winEl.querySelectorAll) {
+			winEl.querySelectorAll('[data-mhj-cd]').forEach((el) => {
+				el.innerHTML = cooldownBadgeHtml(el.getAttribute('data-mhj-cd'));
+			});
+		}
 	}
 
 	function updateUI() {
@@ -1015,9 +1019,6 @@
                 <span>OD Insurance:</span>
                 <span id="mhj-ins-status" class="${insurance.cls}">${insurance.text}</span>
             </div>
-            <div class="mhj-row" style="font-size:11px; background:#222; padding:4px; border-radius:4px;">
-                <span>🎒 Stock: <b style="color:#4caf50">${totalCandies}</b> Candies | <b style="color:#4caf50">${jumpData.stock.xanax}</b> Xan | <b style="color:#4caf50">${jumpData.stock.ecstasy}</b> E</span>
-            </div>
             <div id="mhj-api-status">${renderApiStatusHtml()}</div>
             ${scanStatusMsg ? `<div style="font-size:10px; color:#ffca28; margin-bottom:6px;">${scanStatusMsg}</div>` : ''}
             <div class="mhj-step-body open" style="margin:6px 0;">
@@ -1156,13 +1157,14 @@
 		}
 
 		const stepProgress = (used, need) => (isDone ? need : isActive ? Math.min(used, need) : 0);
-		const progressLine = (label, used, need, stock, extraStyle) => {
+		const progressLine = (label, used, need, stock, extraStyle, badgeKind) => {
 			const done = stepProgress(used, need);
 			const pct = Math.round((done / need) * 100);
 			const complete = done >= need;
 			const lowStock = !isDone && stock < need - done;
+			const badge = badgeKind && isActive && !complete ? ` <span class="mhj-cd" data-mhj-cd="${badgeKind}" style="font-size:10px;">${cooldownBadgeHtml(badgeKind)}</span>` : '';
 			return `<div class="mhj-action-line" style="${extraStyle || ''}">
-                        <span>• ${label}</span>
+                        <span>• ${label}${badge}</span>
                         <span style="color:${complete ? '#4caf50' : '#fff'}">${done} / ${need} used</span>
                     </div>
                     <div class="mhj-progress"><div class="mhj-progress-fill ${complete ? 'complete' : ''}" style="width:${pct}%"></div></div>
@@ -1178,8 +1180,8 @@
                 <div class="mhj-step-body ${isOpen ? 'open' : ''}">
                     ${progressLine('Candy', jumpData.progress.candy, step.candies, totalCandies)}
                     ${candySubsHtml}
-                    ${step.xanax > 0 ? progressLine('Xanax', jumpData.progress.xan, step.xanax, jumpData.stock.xanax) : ''}
-                    ${step.ecstasy > 0 ? progressLine('Ecstasy', jumpData.progress.ext, step.ecstasy, jumpData.stock.ecstasy, 'margin-top:4px;') : ''}
+                    ${step.xanax > 0 ? progressLine('Xanax', jumpData.progress.xan, step.xanax, jumpData.stock.xanax, '', 'xan') : ''}
+                    ${step.ecstasy > 0 ? progressLine('Ecstasy', jumpData.progress.ext, step.ecstasy, jumpData.stock.ecstasy, 'margin-top:4px;', 'ext') : ''}
                     <div style="margin-top:5px; color:#ccc;">
                         ${step.instructions.map((instruction) => `<div>• ${instruction}</div>`).join('')}
                     </div>
