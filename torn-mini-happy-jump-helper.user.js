@@ -1,14 +1,918 @@
 // ==UserScript==
-// @name         Torn - Mini Happy Jump Helper
+// @name         Torn Mini Happy Jump Assistant
 // @namespace    https://github.com/jascheri/Torn-Mini-Happy-Jump-Helper
-// @version      0.1.0
-// @description  Helper for happy jumps in Torn
-// @author       jascheri
+// @version      9.5
+// @description  Mini Happy Jump planner with inventory tracking, cooldown guidance, and multi-tab sync.
+// @author       You
 // @match        https://www.torn.com/*
-// @grant        none
+// @updateURL    https://raw.githubusercontent.com/jascheri/Torn-Mini-Happy-Jump-Helper/main/torn-mini-happy-jump-helper.user.js
+// @downloadURL  https://raw.githubusercontent.com/jascheri/Torn-Mini-Happy-Jump-Helper/main/torn-mini-happy-jump-helper.user.js
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      api.torn.com
 // ==/UserScript==
 
-(function () {
+(function() {
     'use strict';
 
+    const CANDY_TYPES = {
+        "bag of candy": { happy: 25, cd: 30 },
+        "chocolate bar": { happy: 15, cd: 20 },
+        "love hearts": { happy: 10, cd: 15 },
+        "pixie sticks": { happy: 12, cd: 15 },
+        "bag of chocolate truffles": { happy: 50, cd: 45 },
+        "white chocolate": { happy: 20, cd: 25 },
+        "jawbreaker": { happy: 30, cd: 35 },
+        "peppermint": { happy: 8, cd: 10 }
+    };
+
+    const DEFAULT_DATA = {
+        insuranceStartTime: null,
+        currentDay: 1,
+        step: 1,
+        preSetupXanaxUsed: false,
+        isMinimized: true,
+        iconX: null,
+        iconY: null,
+        winX: null,
+        winY: null,
+        stock: {
+            xanax: 0,
+            ecstasy: 0,
+            candies: {}
+        },
+        lastScraped: null
+    };
+
+    const JUMP_STEPS = [
+        {
+            title: 'D1 7am: Full Jump',
+            candies: 48,
+            xanax: 0,
+            ecstasy: 1,
+            instructions: [
+                'Eat 48 candies, take Ecstasy, then train with 400E.',
+                'Use the point refill, then train with 150E.',
+                'Wait for Ecstasy cooldown (200–231 minutes) to clear before the next drug.'
+            ]
+        },
+        {
+            title: 'D1 8pm: Half Jump',
+            candies: 17,
+            xanax: 1,
+            ecstasy: 1,
+            instructions: [
+                'Let energy refill to full before taking Xanax.',
+                'Check that the shared drug cooldown is clear, take Xanax, then wait for Xanax cooldown (360–480 minutes) to clear.',
+                'Eat 17 candies, take Ecstasy, then train.',
+                'Wait for Ecstasy cooldown (200–231 minutes) to clear before the next drug.'
+            ]
+        },
+        {
+            title: 'D2 3pm: Full Jump',
+            candies: 48,
+            xanax: 1,
+            ecstasy: 1,
+            instructions: [
+                'Let energy refill to full before taking Xanax.',
+                'Check that the shared drug cooldown is clear, take Xanax, then wait for Xanax cooldown (360–480 minutes) to clear.',
+                'Eat 48 candies, take Ecstasy, then train.',
+                'Use the point refill, then train again.',
+                'Wait for Ecstasy cooldown (200–231 minutes) to clear before the next drug.'
+            ]
+        },
+        {
+            title: 'D3 7am: Full Jump',
+            candies: 48,
+            xanax: 1,
+            ecstasy: 1,
+            instructions: [
+                'Let energy refill to full before taking Xanax.',
+                'Check that the shared drug cooldown is clear, take Xanax, then wait for Xanax cooldown (360–480 minutes) to clear.',
+                'Eat 48 candies, take Ecstasy, then train.',
+                'Use the point refill, then train again.',
+                'Wait for Ecstasy cooldown (200–231 minutes) to clear before the next drug.'
+            ]
+        },
+        {
+            title: 'D4 7am: Final Full Jump',
+            candies: 48,
+            xanax: 1,
+            ecstasy: 1,
+            instructions: [
+                'Let energy refill to full before taking Xanax.',
+                'Check that the shared drug cooldown is clear, take Xanax, then wait for Xanax cooldown (360–480 minutes) to clear.',
+                'Eat 48 candies, take Ecstasy, then train.',
+                'Use the point refill, then train again.',
+                'Finish training before the OD insurance expires.',
+                'Wait for Ecstasy cooldown (200–231 minutes) to clear before the next drug.'
+            ]
+        }
+    ];
+
+    function normalizeData(data) {
+        const stored = data && typeof data === 'object' ? data : {};
+        const stock = stored.stock && typeof stored.stock === 'object' ? stored.stock : {};
+        const candies = stock.candies && typeof stock.candies === 'object' && !Array.isArray(stock.candies)
+            ? stock.candies
+            : {};
+
+        return {
+            ...DEFAULT_DATA,
+            ...stored,
+            step: Number.isInteger(stored.step) && stored.step >= 1 && stored.step <= JUMP_STEPS.length ? stored.step : 1,
+            preSetupXanaxUsed: stored.preSetupXanaxUsed === true,
+            stock: {
+                xanax: Number.isInteger(stock.xanax) && stock.xanax >= 0 ? stock.xanax : 0,
+                ecstasy: Number.isInteger(stock.ecstasy) && stock.ecstasy >= 0 ? stock.ecstasy : 0,
+                candies: { ...candies }
+            }
+        };
+    }
+
+    let jumpData = normalizeData(GM_getValue('torn_mhj_data', DEFAULT_DATA));
+
+    let currentView = 'main';
+    let manualToggles = {};
+    let scanStatusMsg = '';
+
+    function saveData() {
+        GM_setValue('torn_mhj_data', jumpData);
+    }
+
+    // The API key lives in its own storage entry so it is never part of the synced jump state.
+    const API_KEY_STORAGE = 'torn_mhj_api_key';
+    const API_REFRESH_MS = 60 * 1000;
+    let apiKey = String(GM_getValue(API_KEY_STORAGE, '') || '');
+    let apiState = { drugEnd: 0, energyFullAt: 0, fetchedAt: 0, error: '', loading: false };
+    let apiTimer = null;
+
+    function tornApiGet(path) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `https://api.torn.com/v2${path}?comment=MiniHappyJumpHelper`,
+                headers: { Authorization: `ApiKey ${apiKey}`, Accept: 'application/json' },
+                timeout: 15000,
+                onload: (res) => {
+                    let body;
+                    try { body = JSON.parse(res.responseText); } catch (e) { return reject(new Error('Bad API response')); }
+                    if (body && body.error) return reject(new Error(`API error ${body.error.code}: ${body.error.error}`));
+                    resolve(body);
+                },
+                onerror: () => reject(new Error('Network error')),
+                ontimeout: () => reject(new Error('API request timed out'))
+            });
+        });
+    }
+
+    async function refreshApiState() {
+        if (!apiKey || apiState.loading) return;
+        apiState.loading = true;
+        try {
+            const [cd, bars] = await Promise.all([tornApiGet('/user/cooldowns'), tornApiGet('/user/bars')]);
+            const now = Date.now();
+            apiState.drugEnd = now + (Number(cd.cooldowns.drug) || 0) * 1000;
+            apiState.energyFullAt = now + (Number(bars.bars.energy.full_time) || 0) * 1000;
+            apiState.fetchedAt = now;
+            apiState.error = '';
+        } catch (e) {
+            apiState.error = e.message;
+        }
+        apiState.loading = false;
+        if (currentView === 'main') updateUI();
+    }
+
+    function setApiKey(val) {
+        apiKey = val;
+        GM_setValue(API_KEY_STORAGE, val);
+        apiState = { drugEnd: 0, energyFullAt: 0, fetchedAt: 0, error: '', loading: false };
+        startApiPolling();
+    }
+
+    GM_addValueChangeListener(API_KEY_STORAGE, function(name, old_value, new_value, remote) {
+        if (remote) {
+            apiKey = String(new_value || '');
+            apiState = { drugEnd: 0, energyFullAt: 0, fetchedAt: 0, error: '', loading: false };
+            startApiPolling();
+        }
+    });
+
+    function startApiPolling() {
+        if (apiTimer) clearInterval(apiTimer);
+        apiTimer = null;
+        if (!apiKey) return;
+        refreshApiState();
+        apiTimer = setInterval(refreshApiState, API_REFRESH_MS);
+    }
+
+    function formatDuration(ms) {
+        const total = Math.max(0, Math.ceil(ms / 1000));
+        const h = Math.floor(total / 3600);
+        const m = Math.floor((total % 3600) / 60);
+        const s = total % 60;
+        return `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+    }
+
+    function renderApiStatusHtml() {
+        if (!apiKey) {
+            return '<div style="font-size:10px; color:#aaa; margin-bottom:6px;">Add a Torn API key in ⚙️ to show drug cooldown and energy.</div>';
+        }
+        if (apiState.error) {
+            return `<div style="font-size:10px; color:#f44336; margin-bottom:6px;">${apiState.error}</div>`;
+        }
+        if (!apiState.fetchedAt) {
+            return '<div style="font-size:10px; color:#aaa; margin-bottom:6px;">Loading cooldown…</div>';
+        }
+        const now = Date.now();
+        const drugLeft = apiState.drugEnd - now;
+        const energyLeft = apiState.energyFullAt - now;
+        const drugHtml = drugLeft > 0
+            ? `<span class="mhj-expired">${formatDuration(drugLeft)}</span>`
+            : '<span class="mhj-ok">Ready</span>';
+        const energyHtml = energyLeft > 0
+            ? `<span style="color:#ffca28;">${formatDuration(energyLeft)} to full</span>`
+            : '<span class="mhj-ok">Full</span>';
+        return `
+            <div class="mhj-row" style="font-size:11px; background:#222; padding:4px; border-radius:4px;">
+                <span>💊 Drug CD: ${drugHtml}</span>
+                <span>⚡ ${energyHtml}</span>
+            </div>`;
+    }
+
+    GM_addValueChangeListener('torn_mhj_data', function(name, old_value, new_value, remote) {
+        if (remote && new_value) {
+            jumpData = normalizeData(new_value);
+            applyPositions();
+            updateUI();
+        }
+    });
+
+    const style = document.createElement('style');
+    style.innerHTML = `
+        #mhj-icon {
+            position: fixed;
+            width: 42px;
+            height: 42px;
+            padding: 0;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: grab;
+            background: #2e7d32;
+            border: 2px solid #4caf50;
+            color: #fff;
+            font-size: 18px;
+            z-index: 99999;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            user-select: none;
+        }
+        #mhj-icon:active { cursor: grabbing; }
+        #mhj-icon:hover { background: #388e3c; }
+
+        #mhj-window {
+            position: fixed;
+            width: 320px;
+            background: rgba(30, 30, 30, 0.95);
+            color: #fff;
+            border: 1px solid #444;
+            border-radius: 8px;
+            padding: 12px;
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+            z-index: 99999;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+            user-select: none;
+        }
+        #mhj-header {
+            margin: 0 0 8px 0;
+            font-size: 14px;
+            color: #4caf50;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: grab;
+        }
+        #mhj-header:active { cursor: grabbing; }
+        .mhj-controls-right {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+        .mhj-action-btn {
+            background: none;
+            border: none;
+            color: #aaa;
+            cursor: pointer;
+            font-size: 13px;
+            padding: 0;
+            line-height: 1;
+        }
+        .mhj-action-btn:hover { color: #fff; }
+
+        .mhj-row {
+            margin-bottom: 6px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .mhj-btn {
+            background: #2e7d32;
+            color: #fff;
+            border: none;
+            padding: 6px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            margin-top: 6px;
+            width: 100%;
+        }
+        .mhj-btn:hover { background: #388e3c; }
+        .mhj-btn-reset { background: #c62828; margin-top: 4px; }
+        .mhj-btn-reset:hover { background: #d32f2f; }
+
+        .mhj-input {
+            width: 60px;
+            background: #222;
+            border: 1px solid #555;
+            color: #fff;
+            padding: 4px;
+            border-radius: 4px;
+            font-size: 12px;
+            text-align: center;
+        }
+
+        .mhj-step-list {
+            background: #222;
+            border: 1px solid #333;
+            border-radius: 6px;
+            padding: 6px;
+            margin: 8px 0;
+            max-height: 220px;
+            overflow-y: auto;
+        }
+        .mhj-step-container {
+            border-bottom: 1px solid #333;
+            margin-bottom: 4px;
+            padding-bottom: 4px;
+        }
+        .mhj-step-container:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+
+        .mhj-step-header {
+            padding: 5px;
+            background: #2a2a2a;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11px;
+        }
+        .mhj-step-header:hover { background: #333; }
+        .mhj-step-active-header {
+            background: rgba(46, 125, 50, 0.4);
+            border-left: 3px solid #4caf50;
+        }
+        .mhj-step-body {
+            padding: 6px 8px;
+            font-size: 10.5px;
+            color: #ccc;
+            background: #1e1e1e;
+            border-radius: 0 0 4px 4px;
+            display: none;
+        }
+        .mhj-step-body.open { display: block; }
+        .mhj-action-line {
+            margin-bottom: 3px;
+            display: flex;
+            justify-content: space-between;
+        }
+        .mhj-candy-sub {
+            font-size: 10px;
+            color: #aaa;
+            padding-left: 10px;
+            border-left: 2px solid #444;
+            margin: 2px 0;
+        }
+        .mhj-ok { color: #4caf50; font-weight: bold; }
+        .mhj-expired { color: #f44336; font-weight: bold; }
+    `;
+    document.head.appendChild(style);
+
+    const iconEl = document.createElement('div');
+    iconEl.id = 'mhj-icon';
+    iconEl.innerHTML = `⚡`;
+    iconEl.title = "Click to open Mini Happy Jump Assistant";
+    document.body.appendChild(iconEl);
+
+    const winEl = document.createElement('div');
+    winEl.id = 'mhj-window';
+    document.body.appendChild(winEl);
+
+    let timerInterval = null;
+
+    function applyPositions() {
+        if (typeof jumpData.iconX === 'number' && typeof jumpData.iconY === 'number' && !isNaN(jumpData.iconX)) {
+            iconEl.style.left = `${jumpData.iconX}px`;
+            iconEl.style.top = `${jumpData.iconY}px`;
+            iconEl.style.right = 'auto';
+            iconEl.style.transform = 'none';
+        } else {
+            iconEl.style.right = '25px';
+            iconEl.style.top = '50%';
+            iconEl.style.left = 'auto';
+            iconEl.style.transform = 'translateY(-50%)';
+        }
+
+        if (typeof jumpData.winX === 'number' && typeof jumpData.winY === 'number' && !isNaN(jumpData.winX)) {
+            winEl.style.left = `${jumpData.winX}px`;
+            winEl.style.top = `${jumpData.winY}px`;
+            winEl.style.right = 'auto';
+            winEl.style.bottom = 'auto';
+        } else {
+            winEl.style.right = '80px';
+            winEl.style.top = '80px';
+            winEl.style.left = 'auto';
+        }
+    }
+
+    function getTotalCandyCount() {
+        return Object.values(jumpData.stock.candies).reduce((a, b) => a + b, 0);
+    }
+
+    function parseStockInput(input) {
+        const value = Number(input.value);
+        return Number.isInteger(value) && value >= 0 ? value : null;
+    }
+
+    function scrapeDataAttributes(isAutomatic = false) {
+        const items = Array.from(document.querySelectorAll('li[data-item][data-qty]'))
+            .filter(el => el.getClientRects().length > 0);
+        if (items.length === 0) {
+            scanStatusMsg = 'No visible inventory rows found. Existing stock was kept unchanged.';
+            updateUI();
+            if (!isAutomatic) {
+                alert("No visible inventory items found! Make sure you are on item.php with your items loaded.");
+            }
+            return false;
+        }
+
+        let foundXan = 0;
+        let foundExt = 0;
+        let foundCandies = {};
+
+        items.forEach(el => {
+            const itemId = el.getAttribute('data-item');
+            const qty = Number.parseInt(el.getAttribute('data-qty'), 10);
+            if (!Number.isInteger(qty) || qty < 0) return;
+            const sortName = (el.getAttribute('data-sort') || el.innerText || '').toLowerCase();
+            const category = (el.getAttribute('data-category') || '').toLowerCase();
+
+            if (itemId === '206' || sortName.includes('xanax')) {
+                foundXan += qty;
+            } else if (itemId === '205' || sortName.includes('ecstasy')) {
+                foundExt += qty;
+            } else if (category === 'candy' || sortName.includes('candy') || sortName.includes('chocolate') || sortName.includes('hearts') || sortName.includes('sticks') || sortName.includes('jawbreaker') || sortName.includes('peppermint')) {
+                let matchedName = null;
+                for (const cName of Object.keys(CANDY_TYPES)) {
+                    if (sortName.includes(cName)) {
+                        matchedName = cName;
+                        break;
+                    }
+                }
+                const keyName = matchedName || (sortName.trim() || "other candy");
+                foundCandies[keyName] = (foundCandies[keyName] || 0) + qty;
+            }
+        });
+
+        jumpData.stock.xanax = foundXan;
+        jumpData.stock.ecstasy = foundExt;
+        jumpData.stock.candies = foundCandies;
+        jumpData.lastScraped = new Date().toLocaleTimeString();
+        scanStatusMsg = `Inventory synced: ${foundXan} Xanax, ${foundExt} Ecstasy, ${getTotalCandyCount()} candies.`;
+        saveData();
+        updateUI();
+        if (!isAutomatic) {
+            alert(`Successfully synced! Xanax: ${foundXan}, Ecstasy: ${foundExt}, Candies: ${getTotalCandyCount()}`);
+        }
+        return true;
+    }
+
+    function scheduleAutomaticInventorySync() {
+        if (window.location.pathname !== '/item.php') return;
+
+        const startedAt = Date.now();
+        let lastRowCount = 0;
+        let stablePolls = 0;
+        const poll = setInterval(() => {
+            const rowCount = document.querySelectorAll('li[data-item][data-qty]').length;
+            stablePolls = rowCount > 0 && rowCount === lastRowCount ? stablePolls + 1 : 0;
+            lastRowCount = rowCount;
+
+            if (rowCount > 0 && stablePolls >= 3 && Date.now() - startedAt >= 4000) {
+                clearInterval(poll);
+                scrapeDataAttributes(true);
+            } else if (Date.now() - startedAt >= 20000) {
+                clearInterval(poll);
+                scanStatusMsg = 'Inventory did not finish loading in time. Use [Sync] to try again.';
+                updateUI();
+            }
+        }, 1000);
+    }
+
+    function updateUI() {
+        if (timerInterval) clearInterval(timerInterval);
+        applyPositions();
+
+        if (jumpData.isMinimized) {
+            iconEl.style.display = 'flex';
+            winEl.style.display = 'none';
+            return;
+        }
+
+        iconEl.style.display = 'none';
+        winEl.style.display = 'block';
+
+        if (currentView === 'settings') {
+            winEl.innerHTML = `
+                <div id="mhj-header">
+                    <span>⚙️ Settings</span>
+                    <div class="mhj-controls-right">
+                        <button class="mhj-action-btn" id="mhj-back-btn" title="Back">⬅️</button>
+                    </div>
+                </div>
+                <div style="font-size:11px; color:#aaa; margin-bottom:8px;">
+                    Torn API key (Minimal access is enough). Used only to read your drug cooldown and energy bar from api.torn.com. It is stored locally in Tampermonkey, is not shared with anyone, and is never synced into the jump data.
+                </div>
+                <input type="password" id="mhj-api-key" class="mhj-input" style="width:100%; box-sizing:border-box; text-align:left;" placeholder="Paste API key" value="${apiKey.replace(/[^A-Za-z0-9]/g, '')}" autocomplete="off">
+                <button class="mhj-btn" id="mhj-save-key">Save Key</button>
+                <button class="mhj-btn mhj-btn-reset" id="mhj-clear-key">Remove Key</button>
+                <div style="font-size:10px; color:#aaa; margin-top:6px;">Create one at <a href="https://www.torn.com/preferences.php#tab=api" style="color:#4caf50;" target="_blank">Preferences → API</a>.</div>
+            `;
+            document.getElementById('mhj-back-btn').onclick = () => { currentView = 'main'; updateUI(); };
+            document.getElementById('mhj-save-key').onclick = () => {
+                const val = document.getElementById('mhj-api-key').value.trim();
+                if (!/^[A-Za-z0-9]{16}$/.test(val)) {
+                    alert('A Torn API key is 16 letters and numbers.');
+                    return;
+                }
+                setApiKey(val);
+                currentView = 'main';
+                updateUI();
+            };
+            document.getElementById('mhj-clear-key').onclick = () => {
+                setApiKey('');
+                currentView = 'main';
+                updateUI();
+            };
+            return;
+        }
+
+        const totalCandies = getTotalCandyCount();
+
+        if (currentView === 'stock') {
+            let candyBreakdownHtml = '';
+            for (const [cName, stats] of Object.entries(CANDY_TYPES)) {
+                const count = jumpData.stock.candies[cName] || 0;
+                candyBreakdownHtml += `
+                    <div class="mhj-row" style="font-size:10.5px; margin-bottom:3px;">
+                        <span style="text-transform:capitalize;">${cName} (+${stats.happy}H):</span>
+                        <input type="number" data-candy="${cName}" class="mhj-input edit-candy-qty" value="${count}" style="width:50px;">
+                    </div>
+                `;
+            }
+
+            winEl.innerHTML = `
+                <div id="mhj-header">
+                    <span>📦 Manual Stock Backup</span>
+                    <div class="mhj-controls-right">
+                        <button class="mhj-action-btn" id="mhj-back-btn" title="Back">⬅️</button>
+                    </div>
+                </div>
+                <div style="font-size:11px; color:#aaa; margin-bottom:8px;">
+                    Inventory auto-syncs on the <a href="https://www.torn.com/item.php" style="color:#4caf50;" target="_blank">Items</a> page after its rows load. Use [Sync] to retry or override below:
+                </div>
+                ${scanStatusMsg ? `<div style="font-size:10px; color:#ffca28; margin-bottom:6px;">${scanStatusMsg}</div>` : ''}
+                <div class="mhj-row">
+                    <span>Xanax:</span>
+                    <input type="number" min="0" step="1" id="edit-xan" class="mhj-input" value="${jumpData.stock.xanax}">
+                </div>
+                <div class="mhj-row">
+                    <span>Ecstasy:</span>
+                    <input type="number" min="0" step="1" id="edit-ext" class="mhj-input" value="${jumpData.stock.ecstasy}">
+                </div>
+                <div style="font-size:11px; color:#4caf50; margin: 6px 0 2px 0; font-weight:bold;">Candy Breakdown:</div>
+                <div style="max-height:100px; overflow-y:auto; border:1px solid #444; padding:4px; border-radius:4px; background:#222;">
+                    ${candyBreakdownHtml}
+                </div>
+                <button class="mhj-btn" id="mhj-save-stock" style="margin-top:8px;">Save Override</button>
+            `;
+
+            document.getElementById('mhj-back-btn').onclick = () => { currentView = 'main'; updateUI(); };
+            document.getElementById('mhj-save-stock').onclick = () => {
+                const xanax = parseStockInput(document.getElementById('edit-xan'));
+                const ecstasy = parseStockInput(document.getElementById('edit-ext'));
+                const candyInputs = Array.from(document.querySelectorAll('.edit-candy-qty'));
+                const candyValues = candyInputs.map(input => parseStockInput(input));
+                if (xanax === null || ecstasy === null || candyValues.includes(null)) {
+                    alert('Stock counts must be whole numbers greater than or equal to zero.');
+                    return;
+                }
+
+                jumpData.stock.xanax = xanax;
+                jumpData.stock.ecstasy = ecstasy;
+                candyInputs.forEach((input, index) => {
+                    const name = input.getAttribute('data-candy');
+                    const val = candyValues[index];
+                    if (val > 0) {
+                        jumpData.stock.candies[name] = val;
+                    } else {
+                        delete jumpData.stock.candies[name];
+                    }
+                });
+
+                saveData();
+                currentView = 'main';
+                updateUI();
+            };
+            return;
+        }
+
+        const now = Date.now();
+        const threeDaysMs = 3 * 24 * 60 * 60 * 1000;
+        let insuranceStatusText = 'Not Active', insuranceClass = '';
+
+        if (jumpData.insuranceStartTime) {
+            const elapsed = now - jumpData.insuranceStartTime;
+            const remaining = threeDaysMs - elapsed;
+            if (remaining > 0) {
+                const hoursLeft = Math.floor(remaining / (1000 * 60 * 60));
+                const minsLeft = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
+                const secsLeft = Math.floor((remaining % (1000 * 60)) / 1000);
+                insuranceStatusText = `${hoursLeft}h ${String(minsLeft).padStart(2, '0')}m ${String(secsLeft).padStart(2, '0')}s left`;
+                insuranceClass = 'mhj-ok';
+            } else {
+                insuranceStatusText = 'EXPIRED';
+                insuranceClass = 'mhj-expired';
+            }
+        }
+
+        winEl.innerHTML = `
+            <div id="mhj-header">
+                <span>⚡ Mini Happy Jump</span>
+                <div class="mhj-controls-right">
+                    <button class="mhj-action-btn" id="mhj-sync-btn" title="Retry inventory sync from the current Items page" style="color:#4caf50; font-size:11px; text-decoration:underline; cursor:pointer; background:none; border:none;">[Sync]</button>
+                    <button class="mhj-action-btn" id="mhj-stock-btn" title="Manual Backup">📦</button>
+                    <button class="mhj-action-btn" id="mhj-settings-btn" title="Settings (API key)">⚙️</button>
+                    <span style="font-size:10px; color:#aaa;" title="Drag header">≡</span>
+                    <button class="mhj-action-btn" id="mhj-minimize-btn" title="Minimize">🗕</button>
+                </div>
+            </div>
+            <div class="mhj-row">
+                <span>OD Insurance:</span>
+                <span class="${insuranceClass}">${insuranceStatusText}</span>
+            </div>
+            <div class="mhj-row" style="font-size:11px; background:#222; padding:4px; border-radius:4px;">
+                <span>🎒 Stock: <b style="color:#4caf50">${totalCandies}</b> Candies | <b style="color:#4caf50">${jumpData.stock.xanax}</b> Xan | <b style="color:#4caf50">${jumpData.stock.ecstasy}</b> E</span>
+            </div>
+            ${renderApiStatusHtml()}
+            ${scanStatusMsg ? `<div style="font-size:10px; color:#ffca28; margin-bottom:6px;">${scanStatusMsg}</div>` : ''}
+            <div class="mhj-step-body open" style="margin:6px 0;">
+                <b>Before-bed pre-setup:</b> let energy refill to full, take 1 Xanax, then sleep. Xanax cooldown is 360–480 minutes; wait until Torn shows it has cleared before the next drug.
+                <button class="mhj-btn" id="mhj-pre-setup" ${jumpData.preSetupXanaxUsed ? 'disabled' : ''}>
+                    ${jumpData.preSetupXanaxUsed ? 'Bedtime Xanax Marked Used' : `Mark Bedtime Xanax Used (${jumpData.stock.xanax} / 1)`}
+                </button>
+            </div>
+
+            <div class="mhj-step-list">
+                ${JUMP_STEPS.map((step, index) => renderAccordionStep(step, index + 1, jumpData.step)).join('')}
+            </div>
+
+            <button class="mhj-btn" id="mhj-next-btn">Mark Current Jump Completed ➔</button>
+            <div style="font-size:10px; color:#aaa;">Completing a jump deducts its listed items. Complete it only after the cooldown waits and actions are done.</div>
+            ${!jumpData.insuranceStartTime ? '<button class="mhj-btn" id="mhj-start-ins" style="background:#0277bd;">Start 3-Day Insurance Clock</button>' : ''}
+            <button class="mhj-btn mhj-btn-reset" id="mhj-reset-btn">Reset Cycle</button>
+        `;
+
+        for (let i = 1; i <= JUMP_STEPS.length; i++) {
+            const headerEl = document.getElementById(`mhj-step-hdr-${i}`);
+            if (headerEl) {
+                headerEl.onclick = () => {
+                    const isActive = i === jumpData.step;
+                    const currentlyOpen = manualToggles[i] !== undefined ? manualToggles[i] : isActive;
+                    manualToggles[i] = !currentlyOpen;
+                    updateUI();
+                };
+            }
+        }
+
+        document.getElementById('mhj-sync-btn').onclick = (e) => {
+            e.stopPropagation();
+            scrapeDataAttributes();
+        };
+
+        document.getElementById('mhj-stock-btn').onclick = (e) => { e.stopPropagation(); currentView = 'stock'; updateUI(); };
+        document.getElementById('mhj-settings-btn').onclick = (e) => { e.stopPropagation(); currentView = 'settings'; updateUI(); };
+        document.getElementById('mhj-minimize-btn').onclick = (e) => { e.stopPropagation(); jumpData.isMinimized = true; saveData(); updateUI(); };
+
+        document.getElementById('mhj-pre-setup').onclick = () => {
+            if (jumpData.preSetupXanaxUsed) return;
+            if (jumpData.stock.xanax < 1) {
+                alert('Not enough Xanax in tracked stock. Sync or update your stock before marking the pre-setup.');
+                return;
+            }
+            jumpData.stock.xanax -= 1;
+            jumpData.preSetupXanaxUsed = true;
+            saveData();
+            updateUI();
+        };
+
+        document.getElementById('mhj-next-btn').onclick = () => {
+            const step = JUMP_STEPS[jumpData.step - 1];
+            const totalAvailableCandies = getTotalCandyCount();
+            if (totalAvailableCandies < step.candies || jumpData.stock.xanax < step.xanax || jumpData.stock.ecstasy < step.ecstasy) {
+                alert(`Not enough tracked stock for ${step.title}. Need ${step.candies} candies, ${step.xanax} Xanax, and ${step.ecstasy} Ecstasy.`);
+                return;
+            }
+
+            let remainingCandies = step.candies;
+            for (const [cName, count] of Object.entries(jumpData.stock.candies)) {
+                const take = Math.min(count, remainingCandies);
+                jumpData.stock.candies[cName] -= take;
+                remainingCandies -= take;
+                if (jumpData.stock.candies[cName] === 0) delete jumpData.stock.candies[cName];
+                if (remainingCandies === 0) break;
+            }
+
+            jumpData.stock.xanax -= step.xanax;
+            jumpData.stock.ecstasy -= step.ecstasy;
+            const completedCycle = jumpData.step === JUMP_STEPS.length;
+            jumpData.step = (jumpData.step % JUMP_STEPS.length) + 1;
+            if (completedCycle) {
+                jumpData.preSetupXanaxUsed = false;
+                jumpData.insuranceStartTime = null;
+            }
+            manualToggles = {};
+            saveData();
+            updateUI();
+        };
+
+        if (document.getElementById('mhj-start-ins')) {
+            document.getElementById('mhj-start-ins').onclick = () => {
+                jumpData.insuranceStartTime = Date.now();
+                saveData();
+                updateUI();
+            };
+        }
+
+        document.getElementById('mhj-reset-btn').onclick = () => {
+            if (confirm("Reset Mini Happy Jump progress and insurance timer?")) {
+                jumpData = normalizeData(DEFAULT_DATA);
+                manualToggles = {};
+                saveData();
+                updateUI();
+            }
+        };
+
+        if (jumpData.insuranceStartTime || apiKey) {
+            timerInterval = setInterval(updateUI, 1000);
+        }
+    }
+
+    function renderAccordionStep(step, stepNum, currentStep) {
+        const isActive = stepNum === currentStep;
+        const isDone = stepNum < currentStep;
+
+        const totalCandies = getTotalCandyCount();
+        const candyColor = totalCandies < step.candies ? '#f44336' : '#4caf50';
+        const xanColor = jumpData.stock.xanax < step.xanax ? '#f44336' : '#4caf50';
+        const extColor = jumpData.stock.ecstasy < step.ecstasy ? '#f44336' : '#4caf50';
+
+        let isOpen = isActive;
+        if (manualToggles[stepNum] !== undefined) {
+            isOpen = manualToggles[stepNum];
+        }
+
+        let candySubsHtml = '';
+        if (Object.keys(jumpData.stock.candies).length > 0) {
+            for (const [cName, count] of Object.entries(jumpData.stock.candies)) {
+                const stats = CANDY_TYPES[cName] || { happy: 20, cd: 30 };
+                candySubsHtml += `<div class="mhj-candy-sub">• ${count}x ${cName} <span style="color:#4caf50">(+${stats.happy}H, ${stats.cd}m CD)</span></div>`;
+            }
+        } else {
+            candySubsHtml = `<div class="mhj-candy-sub" style="color:#f44336">• No categorized candies in stock</div>`;
+        }
+
+        return `
+            <div class="mhj-step-container">
+                <div id="mhj-step-hdr-${stepNum}" class="mhj-step-header ${isActive ? 'mhj-step-active-header' : ''}">
+                    <span>${isDone ? '✅ ' : isActive ? '▶ ' : '▫ '}${step.title}</span>
+                    <span style="font-size:9px; color:#aaa;">${isOpen ? '▲' : '▼'}</span>
+                </div>
+                <div class="mhj-step-body ${isOpen ? 'open' : ''}">
+                    <div class="mhj-action-line">
+                        <span>• Candy needed</span>
+                        <span style="color:${candyColor}">(${totalCandies} / ${step.candies})</span>
+                    </div>
+                    <div class="mhj-action-line">
+                        <span>• Xanax needed</span>
+                        <span style="color:${xanColor}">(${jumpData.stock.xanax} / ${step.xanax})</span>
+                    </div>
+                    <div class="mhj-action-line" style="margin-top:4px;">
+                        <span>• Ecstasy needed</span>
+                        <span style="color:${extColor}">(${jumpData.stock.ecstasy} / ${step.ecstasy})</span>
+                    </div>
+                    ${candySubsHtml}
+                    <div style="margin-top:5px; color:#ccc;">
+                        ${step.instructions.map(instruction => `<div>• ${instruction}</div>`).join('')}
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    // Drag Logic for Icon
+    let iconDragging = false, iconMoved = false, iconStartX, iconStartY;
+    iconEl.onmousedown = (e) => {
+        iconDragging = true;
+        iconMoved = false;
+        if (jumpData.iconX === null) {
+            const rect = iconEl.getBoundingClientRect();
+            iconEl.style.left = `${rect.left}px`;
+            iconEl.style.top = `${rect.top}px`;
+            iconEl.style.right = 'auto';
+            iconEl.style.transform = 'none';
+        }
+        iconStartX = e.clientX - iconEl.offsetLeft;
+        iconStartY = e.clientY - iconEl.offsetTop;
+        e.preventDefault();
+    };
+
+    document.addEventListener('mousemove', (e) => {
+        if (!iconDragging) return;
+        iconMoved = true;
+        let newX = Math.max(0, Math.min(e.clientX - iconStartX, window.innerWidth - iconEl.offsetWidth));
+        let newY = Math.max(0, Math.min(e.clientY - iconStartY, window.innerHeight - iconEl.offsetHeight));
+        iconEl.style.left = `${newX}px`;
+        iconEl.style.top = `${newY}px`;
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (iconDragging) {
+            iconDragging = false;
+            jumpData.iconX = iconEl.offsetLeft;
+            jumpData.iconY = iconEl.offsetTop;
+            saveData();
+            if (!iconMoved) {
+                jumpData.isMinimized = false;
+                saveData();
+                updateUI();
+            }
+        }
+    });
+
+    // Drag Logic for Window
+    let winDragging = false, winStartX, winStartY;
+    winEl.onmousedown = (e) => {
+        const header = document.getElementById('mhj-header');
+        if (header && (e.target === header || header.contains(e.target))) {
+            if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
+            if (jumpData.winX === null) {
+                const rect = winEl.getBoundingClientRect();
+                winEl.style.left = `${rect.left}px`;
+                winEl.style.top = `${rect.top}px`;
+                winEl.style.right = 'auto';
+            }
+            winDragging = true;
+            winStartX = e.clientX - winEl.offsetLeft;
+            winStartY = e.clientY - winEl.offsetTop;
+            e.preventDefault();
+        }
+    };
+
+    document.addEventListener('mousemove', (e) => {
+        if (!winDragging) return;
+        let newX = Math.max(0, Math.min(e.clientX - winStartX, window.innerWidth - winEl.offsetWidth));
+        let newY = Math.max(0, Math.min(e.clientY - winStartY, window.innerHeight - winEl.offsetHeight));
+        winEl.style.left = `${newX}px`;
+        winEl.style.top = `${newY}px`;
+    });
+
+    document.addEventListener('mouseup', () => {
+        if (winDragging) {
+            winDragging = false;
+            jumpData.winX = winEl.offsetLeft;
+            jumpData.winY = winEl.offsetTop;
+            saveData();
+        }
+    });
+
+    applyPositions();
+    updateUI();
+    scheduleAutomaticInventorySync();
+    startApiPolling();
 })();
