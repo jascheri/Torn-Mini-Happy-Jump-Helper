@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Mini Happy Jump Assistant
 // @namespace    https://github.com/jascheri/Torn-Mini-Happy-Jump-Helper
-// @version      9.11
+// @version      9.12
 // @description  Mini Happy Jump planner with inventory tracking, cooldown guidance, and multi-tab sync.
 // @author       You
 // @match        https://www.torn.com/*
@@ -364,6 +364,7 @@
 				fetchedAt: now
 			};
 			GM_setValue(API_CACHE_STORAGE, fresh);
+			dbg('cooldown raw', JSON.stringify(cd), 'energy full_time', bars.bars.energy.full_time, '-> drug ends', new Date(fresh.drugEnd).toLocaleTimeString());
 			adoptApiCache(fresh);
 			reconcileCounters(stats);
 		} catch (e) {
