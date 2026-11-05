@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Mini Happy Jump Assistant
 // @namespace    https://github.com/jascheri/Torn-Mini-Happy-Jump-Helper
-// @version      9.6
+// @version      9.7
 // @description  Mini Happy Jump planner with inventory tracking, cooldown guidance, and multi-tab sync.
 // @author       You
 // @match        https://www.torn.com/*
@@ -613,12 +613,23 @@
                 <div style="font-size:11px; color:#aaa; margin-bottom:8px;">
                     Torn API key (Minimal access is enough). Used only to read your drug cooldown and energy bar from api.torn.com. It is stored locally in Tampermonkey, is not shared with anyone, and is never synced into the jump data.
                 </div>
-                <input type="password" id="mhj-api-key" class="mhj-input" style="width:100%; box-sizing:border-box; text-align:left;" placeholder="Paste API key" value="${apiKey.replace(/[^A-Za-z0-9]/g, '')}" autocomplete="off">
+                <div style="position:relative;">
+                    <input type="password" id="mhj-api-key" class="mhj-input" style="width:100%; box-sizing:border-box; text-align:left; padding-right:28px;" placeholder="Paste API key" value="${apiKey.replace(/[^A-Za-z0-9]/g, '')}" autocomplete="off">
+                    <button class="mhj-action-btn" id="mhj-toggle-key" title="Show key" type="button" style="position:absolute; right:6px; top:50%; transform:translateY(-50%); font-size:14px;">👁️</button>
+                </div>
                 <button class="mhj-btn" id="mhj-save-key">Save Key</button>
                 <button class="mhj-btn mhj-btn-reset" id="mhj-clear-key">Remove Key</button>
                 <div style="font-size:10px; color:#aaa; margin-top:6px;">Create one at <a href="https://www.torn.com/preferences.php#tab=api" style="color:#4caf50;" target="_blank">Preferences → API</a>.</div>
             `;
             document.getElementById('mhj-back-btn').onclick = () => { currentView = 'main'; updateUI(); };
+            document.getElementById('mhj-toggle-key').onclick = () => {
+                const input = document.getElementById('mhj-api-key');
+                const btn = document.getElementById('mhj-toggle-key');
+                const show = input.type === 'password';
+                input.type = show ? 'text' : 'password';
+                btn.textContent = show ? '🙈' : '👁️';
+                btn.title = show ? 'Hide key' : 'Show key';
+            };
             document.getElementById('mhj-save-key').onclick = () => {
                 const val = document.getElementById('mhj-api-key').value.trim();
                 if (!/^[A-Za-z0-9]{16}$/.test(val)) {
