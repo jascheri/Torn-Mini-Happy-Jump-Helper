@@ -19,6 +19,10 @@ The checklist displays Xanax's 360–480 minute cooldown and Ecstasy's 200–231
 
 Click ⚙️ in the header and paste a Torn API key (Minimal access is enough). The script then calls `https://api.torn.com/v2/user/cooldowns` and `/user/bars` once every 5 minutes (only while a Torn tab is visible, and shared across tabs so multiple tabs do not multiply calls) and shows a live drug-cooldown countdown and time until energy is full. The key is stored locally in Tampermonkey (separate from the jump data), is sent only to `api.torn.com`, and can be removed from the same screen. Without a key, wait until Torn shows the cooldown has cleared.
 
+## Automatic item-use tracking
+
+Items used on the Items page are detected from the page's own request, so Xanax, Ecstasy and each candy type are deducted instantly, with no API call. With an API key, the same refresh also reads Torn's lifetime counters (`xantaken`, `exttaken`, `candyused` from `/user/personalstats`) and corrects any use the page hook missed (for example from the mobile app). Counters cannot say which candy was eaten, so missed candies are deducted in stock order. One Items-page sync is still needed first to learn your starting stock and candy item IDs. Auto-tracking and debug logging (`[MHJ]` in the browser console) can be toggled in ⚙️; with auto-tracking off, completing a jump deducts the planned items instead.
+
 ## Inventory sync
 
 On `item.php`, the script waits for the inventory rows to stop changing, then reads visible item rows with `data-item` and `data-qty` attributes. This is a bounded one-time scan with no `MutationObserver`. Use **[Sync]** to retry if the automatic scan times out. A successful scan replaces tracked counts with the quantities it finds; confirm the counts in Torn if the inventory page only rendered part of your inventory.
