@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Mini Happy Jump Assistant
 // @namespace    https://github.com/jascheri/Torn-Mini-Happy-Jump-Helper
-// @version      9.9
+// @version      9.10
 // @description  Mini Happy Jump planner with inventory tracking, cooldown guidance, and multi-tab sync.
 // @author       You
 // @match        https://www.torn.com/*
@@ -416,6 +416,8 @@
 	// Real candy happiness/cooldown values, read once from Torn's item data and cached (item data rarely changes).
 	const CANDY_INFO_STORAGE = 'torn_mhj_candy_info';
 	const CANDY_INFO_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+	const CANDY_TRY_STORAGE = 'torn_mhj_candy_try';
+	const CANDY_RETRY_MS = 60 * 60 * 1000;
 	let candyInfo = GM_getValue(CANDY_INFO_STORAGE, null);
 	let candyInfoLoading = false;
 
@@ -439,9 +441,20 @@
 		return withColor ? `<span style="color:#4caf50">${text}</span>` : text;
 	}
 
+	function unknownCandyNames() {
+		const known = (candyInfo && candyInfo.items) || {};
+		return Object.keys(jumpData.stock.candies).filter((n) => !(String(n).toLowerCase() in known));
+	}
+
 	async function loadCandyInfo() {
 		if (!apiKey || candyInfoLoading) return;
-		if (candyInfo && candyInfo.fetchedAt && Date.now() - candyInfo.fetchedAt < CANDY_INFO_TTL_MS) return;
+		const fresh = candyInfo && candyInfo.fetchedAt && Date.now() - candyInfo.fetchedAt < CANDY_INFO_TTL_MS;
+		const needsLookup = !fresh || unknownCandyNames().length > 0;
+		if (!needsLookup) return;
+		// Retry at most hourly so a candy Torn does not list cannot trigger repeated calls.
+		const lastTry = Number(GM_getValue(CANDY_TRY_STORAGE, 0));
+		if (Date.now() - lastTry < CANDY_RETRY_MS) return;
+		GM_setValue(CANDY_TRY_STORAGE, Date.now());
 		candyInfoLoading = true;
 		try {
 			const res = await tornApiGet('/torn/items', 'cat=Candy');
@@ -759,6 +772,7 @@
 		scanStatusMsg = `Inventory synced: ${foundXan} Xanax, ${foundExt} Ecstasy, ${getTotalCandyCount()} candies.`;
 		saveData();
 		updateUI();
+		loadCandyInfo();
 		if (apiKey) refreshApiState(true);
 		if (!isAutomatic) {
 			alert(`Successfully synced! Xanax: ${foundXan}, Ecstasy: ${foundExt}, Candies: ${getTotalCandyCount()}`);
