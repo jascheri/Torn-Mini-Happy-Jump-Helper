@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Mini Happy Jump Assistant
 // @namespace    https://github.com/jascheri/Torn-Mini-Happy-Jump-Helper
-// @version      9.17
+// @version      9.18
 // @description  Mini Happy Jump planner with inventory tracking, cooldown guidance, and multi-tab sync.
 // @author       You
 // @match        https://www.torn.com/*
@@ -523,6 +523,31 @@
 		const m = Math.floor((total % 3600) / 60);
 		const s = total % 60;
 		return `${h}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+	}
+
+	// Supplies for the remaining run (current step's unused amounts plus all later steps).
+	// Green: enough for the whole run. Red: not enough for even the next step that needs the item. Yellow: in between.
+	function suppliesHtml() {
+		const items = [
+			{ label: 'Candy', key: 'candies', prog: 'candy', stock: getTotalCandyCount() },
+			{ label: 'Xanax', key: 'xanax', prog: 'xan', stock: jumpData.stock.xanax },
+			{ label: 'Ecstasy', key: 'ecstasy', prog: 'ext', stock: jumpData.stock.ecstasy }
+		];
+		const rows = items.map((it) => {
+			let total = 0;
+			let nextNeed = 0;
+			JUMP_STEPS.forEach((step, i) => {
+				const n = i + 1;
+				if (n < jumpData.step) return;
+				const need = Math.max(0, step[it.key] - (n === jumpData.step ? jumpData.progress[it.prog] : 0));
+				total += need;
+				if (!nextNeed && need > 0) nextNeed = need;
+			});
+			if (total === 0) return '';
+			const color = it.stock >= total ? '#4caf50' : it.stock < nextNeed ? '#f44336' : '#ffca28';
+			return `<span style="color:${color}; margin-right:10px;" title="${it.stock} in stock, ${total} needed for the rest of the run">${it.label}: ${it.stock} / ${total}</span>`;
+		});
+		return `<div class="mhj-row" style="display:block;"><b>Supplies:</b> ${rows.join('')}</div>`;
 	}
 
 	// Only problems or setup hints are shown in the panel header; live values appear beside the related action items.
@@ -1069,6 +1094,7 @@
                 <span>OD Insurance:</span>
                 <span id="mhj-ins-status" class="${insurance.cls}">${insurance.text}</span>
             </div>
+            ${suppliesHtml()}
             <div id="mhj-api-status">${renderApiStatusHtml()}</div>
             ${scanStatusMsg ? `<div style="font-size:10px; color:#ffca28; margin-bottom:6px;">${scanStatusMsg}</div>` : ''}
             <div class="mhj-step-list">
@@ -1203,7 +1229,7 @@
 			const done = stepProgress(jumpData.progress.xan, step.xanax);
 			const complete = done >= step.xanax;
 			const short = !isDone && !complete && jumpData.stock.xanax < step.xanax - done;
-			const link = short ? ` <a href="${XANAX_MARKET_URL}" target="_blank" rel="noopener" style="color:#f44336; text-decoration:underline;">(Not enough Xanax)</a>` : '';
+			const link = short ? ` <span title="You have ${jumpData.stock.xanax} Xanax but need ${step.xanax - done} more for this step." style="cursor:help;">⚠️</span> <a href="${XANAX_MARKET_URL}" target="_blank" rel="noopener" style="color:#f44336; text-decoration:underline;">(Not enough Xanax)</a>` : '';
 			const energy = isActive && !complete ? `<div class="mhj-action-line" data-mhj-energy="1">${energyLineHtml()}</div>` : '';
 			return `${energy}<div class="mhj-action-line" style="color:${complete ? '#4caf50' : '#f44336'}">
                         <span>• Take Xanax${link}</span>
