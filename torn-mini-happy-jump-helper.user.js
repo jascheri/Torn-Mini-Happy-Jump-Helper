@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Mini Happy Jump Assistant
 // @namespace    https://github.com/jascheri/Torn-Mini-Happy-Jump-Helper
-// @version      9.10
+// @version      9.11
 // @description  Mini Happy Jump planner with inventory tracking, cooldown guidance, and multi-tab sync.
 // @author       You
 // @match        https://www.torn.com/*
@@ -1142,14 +1142,14 @@
                         <span style="color:${candyColor}">(${totalCandies} / ${step.candies})</span>
                     </div>
                     ${candySubsHtml}
-                    <div class="mhj-action-line">
+                    ${step.xanax > 0 ? `<div class="mhj-action-line">
                         <span>• Xanax needed</span>
                         <span style="color:${xanColor}">(${jumpData.stock.xanax} / ${step.xanax})</span>
-                    </div>
-                    <div class="mhj-action-line" style="margin-top:4px;">
+                    </div>` : ''}
+                    ${step.ecstasy > 0 ? `<div class="mhj-action-line" style="margin-top:4px;">
                         <span>• Ecstasy needed</span>
                         <span style="color:${extColor}">(${jumpData.stock.ecstasy} / ${step.ecstasy})</span>
-                    </div>
+                    </div>` : ''}
                     <div style="margin-top:5px; color:#ccc;">
                         ${step.instructions.map((instruction) => `<div>• ${instruction}</div>`).join('')}
                     </div>
