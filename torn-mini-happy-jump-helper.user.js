@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Mini Happy Jump Assistant
 // @namespace    https://github.com/jascheri/Torn-Mini-Happy-Jump-Helper
-// @version      9.8
+// @version      9.9
 // @description  Mini Happy Jump planner with inventory tracking, cooldown guidance, and multi-tab sync.
 // @author       You
 // @match        https://www.torn.com/*
@@ -19,15 +19,16 @@
 (function () {
 	'use strict';
 
+	// Names are only used to recognise candies in the inventory; happiness/cooldown values come from Torn's item data (see loadCandyInfo).
 	const CANDY_TYPES = {
-		'bag of candy': { happy: 25, cd: 30 },
-		'chocolate bar': { happy: 15, cd: 20 },
-		'love hearts': { happy: 10, cd: 15 },
-		'pixie sticks': { happy: 12, cd: 15 },
-		'bag of chocolate truffles': { happy: 50, cd: 45 },
-		'white chocolate': { happy: 20, cd: 25 },
-		jawbreaker: { happy: 30, cd: 35 },
-		peppermint: { happy: 8, cd: 10 }
+		'bag of candy': {},
+		'chocolate bar': {},
+		'love hearts': {},
+		'pixie sticks': {},
+		'bag of chocolate truffles': {},
+		'white chocolate': {},
+		jawbreaker: {},
+		peppermint: {}
 	};
 
 	const DEFAULT_DATA = {
@@ -412,11 +413,58 @@
 		if (!document.hidden) refreshApiState(false);
 	});
 
+	// Real candy happiness/cooldown values, read once from Torn's item data and cached (item data rarely changes).
+	const CANDY_INFO_STORAGE = 'torn_mhj_candy_info';
+	const CANDY_INFO_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+	let candyInfo = GM_getValue(CANDY_INFO_STORAGE, null);
+	let candyInfoLoading = false;
+
+	function parseCandyEffect(effect) {
+		const text = String(effect || '');
+		const happy = text.match(/happ(?:y|iness)[^0-9]{0,40}(\d+)/i) || text.match(/(\d+)\s*happ/i);
+		const cd = text.match(/cooldown[^0-9]{0,40}(\d+)(?:\s*(?:-|to)\s*(\d+))?\s*minutes?/i) || text.match(/(\d+)(?:\s*(?:-|to)\s*(\d+))?\s*minutes?\s*cooldown/i);
+		return {
+			happy: happy ? Number(happy[1]) : null,
+			cd: cd ? (cd[2] ? `${cd[1]}-${cd[2]}` : String(cd[1])) : null
+		};
+	}
+
+	function candyStatsText(name, withColor) {
+		const info = candyInfo && candyInfo.items && candyInfo.items[String(name).toLowerCase()];
+		if (!info || (info.happy === null && info.cd === null)) return '';
+		const parts = [];
+		if (info.happy !== null) parts.push(`+${info.happy}H`);
+		if (info.cd !== null) parts.push(`${info.cd}m CD`);
+		const text = ` (${parts.join(', ')})`;
+		return withColor ? `<span style="color:#4caf50">${text}</span>` : text;
+	}
+
+	async function loadCandyInfo() {
+		if (!apiKey || candyInfoLoading) return;
+		if (candyInfo && candyInfo.fetchedAt && Date.now() - candyInfo.fetchedAt < CANDY_INFO_TTL_MS) return;
+		candyInfoLoading = true;
+		try {
+			const res = await tornApiGet('/torn/items', 'cat=Candy');
+			const items = {};
+			(res.items || []).forEach((it) => {
+				items[String(it.name).toLowerCase()] = parseCandyEffect(it.effect);
+				dbg('candy effect', it.name, '=>', it.effect);
+			});
+			candyInfo = { fetchedAt: Date.now(), items };
+			GM_setValue(CANDY_INFO_STORAGE, candyInfo);
+			updateUI();
+		} catch (e) {
+			dbg('candy info failed', e.message);
+		}
+		candyInfoLoading = false;
+	}
+
 	function startApiPolling(force) {
 		if (apiTimer) clearInterval(apiTimer);
 		apiTimer = null;
 		if (!apiKey) return;
 		refreshApiState(force);
+		loadCandyInfo();
 		apiTimer = setInterval(() => refreshApiState(false), API_REFRESH_MS);
 	}
 
@@ -838,11 +886,12 @@
 
 		if (currentView === 'stock') {
 			let candyBreakdownHtml = '';
-			for (const [cName, stats] of Object.entries(CANDY_TYPES)) {
+			const editorNames = Array.from(new Set([...Object.keys(CANDY_TYPES), ...Object.keys(jumpData.stock.candies)]));
+			for (const cName of editorNames) {
 				const count = jumpData.stock.candies[cName] || 0;
 				candyBreakdownHtml += `
                     <div class="mhj-row" style="font-size:10.5px; margin-bottom:3px;">
-                        <span style="text-transform:capitalize;">${cName} (+${stats.happy}H):</span>
+                        <span style="text-transform:capitalize;">${cName}${candyStatsText(cName, false)}:</span>
                         <input type="number" data-candy="${cName}" class="mhj-input edit-candy-qty" value="${count}" style="width:50px;">
                     </div>
                 `;
@@ -1061,8 +1110,7 @@
 		let candySubsHtml = '';
 		if (Object.keys(jumpData.stock.candies).length > 0) {
 			for (const [cName, count] of Object.entries(jumpData.stock.candies)) {
-				const stats = CANDY_TYPES[cName] || { happy: 20, cd: 30 };
-				candySubsHtml += `<div class="mhj-candy-sub">• ${count}x ${cName} <span style="color:#4caf50">(+${stats.happy}H, ${stats.cd}m CD)</span></div>`;
+				candySubsHtml += `<div class="mhj-candy-sub">• ${count}x ${cName}${candyStatsText(cName, true)}</div>`;
 			}
 		} else {
 			candySubsHtml = `<div class="mhj-candy-sub" style="color:#f44336">• No candies in stock</div>`;
@@ -1079,6 +1127,7 @@
                         <span>• Candy needed</span>
                         <span style="color:${candyColor}">(${totalCandies} / ${step.candies})</span>
                     </div>
+                    ${candySubsHtml}
                     <div class="mhj-action-line">
                         <span>• Xanax needed</span>
                         <span style="color:${xanColor}">(${jumpData.stock.xanax} / ${step.xanax})</span>
@@ -1087,7 +1136,6 @@
                         <span>• Ecstasy needed</span>
                         <span style="color:${extColor}">(${jumpData.stock.ecstasy} / ${step.ecstasy})</span>
                     </div>
-                    ${candySubsHtml}
                     <div style="margin-top:5px; color:#ccc;">
                         ${step.instructions.map((instruction) => `<div>• ${instruction}</div>`).join('')}
                     </div>
