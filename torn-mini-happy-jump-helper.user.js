@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Mini Happy Jump Assistant
 // @namespace    https://github.com/jascheri/Torn-Mini-Happy-Jump-Helper
-// @version      9.16
+// @version      9.17
 // @description  Mini Happy Jump planner with inventory tracking, cooldown guidance, and multi-tab sync.
 // @author       You
 // @match        https://www.torn.com/*
@@ -145,6 +145,15 @@
 	const AUTO_STORAGE = 'torn_mhj_auto';
 	const DEBUG_STORAGE = 'torn_mhj_debug';
 	let autoTrack = GM_getValue(AUTO_STORAGE, true) !== false;
+	const TCT_STORAGE = 'torn_mhj_tct';
+	let useTct = GM_getValue(TCT_STORAGE, false) === true;
+
+	// Torn City Time is UTC.
+	function formatClock(ts) {
+		const opts = { hour: 'numeric', minute: '2-digit', ...(useTct ? { timeZone: 'UTC' } : {}) };
+		const t = new Date(ts).toLocaleTimeString([], opts);
+		return useTct ? `${t} TCT` : t;
+	}
 	let debugLog = GM_getValue(DEBUG_STORAGE, false) === true;
 	const lastHookHit = {};
 
@@ -544,7 +553,7 @@
 			const est = Math.max(0, max - Math.ceil(left / 1000 / apiState.energyInt) * apiState.energyInc);
 			cur = `${est} / ${max} `;
 		}
-		return `<span style="color:${red}">Wait for full energy: ${cur}— full in ${formatDuration(left)}</span>`;
+		return `<span style="color:${red}">Wait for full energy: ${cur}— full at ${formatClock(apiState.energyFullAt)}</span>`;
 	}
 
 	// kind: 'xan' shows the shared drug cooldown plus energy-full time; 'ext' shows the drug cooldown only.
@@ -922,9 +931,14 @@
                 <div style="font-size:10px; color:#aaa; margin-top:6px;">Create one at <a href="https://www.torn.com/preferences.php#tab=api" style="color:#4caf50;" target="_blank">Preferences → API</a>.</div>
                 <div style="border-top:1px solid #444; margin-top:10px; padding-top:8px; font-size:11px; color:#aaa;">
                     <label style="display:block; margin-bottom:4px; cursor:pointer;"><input type="checkbox" id="mhj-auto-track" ${autoTrack ? 'checked' : ''}> Auto-track item use (Items page + API counters). When on, completing a jump no longer deducts items.</label>
+                    <label style="display:block; margin-bottom:4px; cursor:pointer;"><input type="checkbox" id="mhj-tct" ${useTct ? 'checked' : ''}> Show times in Torn City Time (TCT) instead of local time</label>
                     <label style="display:block; cursor:pointer;"><input type="checkbox" id="mhj-debug" ${debugLog ? 'checked' : ''}> Debug logging (browser console, prefix [MHJ])</label>
                 </div>
             `;
+			document.getElementById('mhj-tct').onchange = (e) => {
+				useTct = e.target.checked;
+				GM_setValue(TCT_STORAGE, useTct);
+			};
 			document.getElementById('mhj-auto-track').onchange = (e) => {
 				autoTrack = e.target.checked;
 				GM_setValue(AUTO_STORAGE, autoTrack);
