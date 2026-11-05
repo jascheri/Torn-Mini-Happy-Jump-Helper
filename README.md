@@ -17,7 +17,7 @@ The checklist displays Xanax's 360–480 minute cooldown and Ecstasy's 200–231
 
 ## Live cooldown and energy (optional API key)
 
-Click ⚙️ in the header and paste a Torn API key (Minimal access is enough). The script then calls `https://api.torn.com/v2/user/cooldowns` and `/user/bars` once a minute and shows a live drug-cooldown countdown and time until energy is full. The key is stored locally in Tampermonkey (separate from the jump data), is sent only to `api.torn.com`, and can be removed from the same screen. Without a key, wait until Torn shows the cooldown has cleared.
+Click ⚙️ in the header and paste a Torn API key (Minimal access is enough). The script then calls `https://api.torn.com/v2/user/cooldowns` and `/user/bars` once every 5 minutes (only while a Torn tab is visible, and shared across tabs so multiple tabs do not multiply calls) and shows a live drug-cooldown countdown and time until energy is full. The key is stored locally in Tampermonkey (separate from the jump data), is sent only to `api.torn.com`, and can be removed from the same screen. Without a key, wait until Torn shows the cooldown has cleared.
 
 ## Inventory sync
 

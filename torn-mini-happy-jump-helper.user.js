@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Mini Happy Jump Assistant
 // @namespace    https://github.com/jascheri/Torn-Mini-Happy-Jump-Helper
-// @version      9.5
+// @version      9.6
 // @description  Mini Happy Jump planner with inventory tracking, cooldown guidance, and multi-tab sync.
 // @author       You
 // @match        https://www.torn.com/*
@@ -145,7 +145,9 @@
 
     // The API key lives in its own storage entry so it is never part of the synced jump state.
     const API_KEY_STORAGE = 'torn_mhj_api_key';
-    const API_REFRESH_MS = 60 * 1000;
+    const API_REFRESH_MS = 5 * 60 * 1000;
+    const API_CACHE_STORAGE = 'torn_mhj_api_cache';
+    const API_BAD_KEY_CODES = [2, 10, 13, 18];
     let apiKey = String(GM_getValue(API_KEY_STORAGE, '') || '');
     let apiState = { drugEnd: 0, energyFullAt: 0, fetchedAt: 0, error: '', loading: false };
     let apiTimer = null;
@@ -160,7 +162,11 @@
                 onload: (res) => {
                     let body;
                     try { body = JSON.parse(res.responseText); } catch (e) { return reject(new Error('Bad API response')); }
-                    if (body && body.error) return reject(new Error(`API error ${body.error.code}: ${body.error.error}`));
+                    if (body && body.error) {
+                        const err = new Error(`API error ${body.error.code}: ${body.error.error}`);
+                        err.apiCode = body.error.code;
+                        return reject(err);
+                    }
                     resolve(body);
                 },
                 onerror: () => reject(new Error('Network error')),
@@ -169,44 +175,80 @@
         });
     }
 
-    async function refreshApiState() {
+    async function refreshApiState(force) {
         if (!apiKey || apiState.loading) return;
+        if (!force && document.hidden) return;
+
+        const cache = GM_getValue(API_CACHE_STORAGE, null);
+        if (!force && cache && Date.now() - cache.fetchedAt < API_REFRESH_MS - 5000) {
+            adoptApiCache(cache);
+            return;
+        }
+
         apiState.loading = true;
         try {
             const [cd, bars] = await Promise.all([tornApiGet('/user/cooldowns'), tornApiGet('/user/bars')]);
             const now = Date.now();
-            apiState.drugEnd = now + (Number(cd.cooldowns.drug) || 0) * 1000;
-            apiState.energyFullAt = now + (Number(bars.bars.energy.full_time) || 0) * 1000;
-            apiState.fetchedAt = now;
-            apiState.error = '';
+            const fresh = {
+                drugEnd: now + (Number(cd.cooldowns.drug) || 0) * 1000,
+                energyFullAt: now + (Number(bars.bars.energy.full_time) || 0) * 1000,
+                fetchedAt: now
+            };
+            GM_setValue(API_CACHE_STORAGE, fresh);
+            adoptApiCache(fresh);
         } catch (e) {
             apiState.error = e.message;
+            // Torn requires dropping keys it rejects so repeated bad calls cannot get the IP banned.
+            if (e.apiCode && API_BAD_KEY_CODES.includes(e.apiCode)) {
+                apiKey = '';
+                GM_setValue(API_KEY_STORAGE, '');
+                if (apiTimer) clearInterval(apiTimer);
+                apiTimer = null;
+                apiState.error = `Key rejected by Torn (${e.message}) and removed. Add a new key in ⚙️.`;
+            }
         }
         apiState.loading = false;
-        if (currentView === 'main') updateUI();
+        tickTimers();
+    }
+
+    function adoptApiCache(cache) {
+        apiState.drugEnd = cache.drugEnd;
+        apiState.energyFullAt = cache.energyFullAt;
+        apiState.fetchedAt = cache.fetchedAt;
+        apiState.error = '';
+        tickTimers();
     }
 
     function setApiKey(val) {
         apiKey = val;
         GM_setValue(API_KEY_STORAGE, val);
+        GM_setValue(API_CACHE_STORAGE, null);
         apiState = { drugEnd: 0, energyFullAt: 0, fetchedAt: 0, error: '', loading: false };
-        startApiPolling();
+        startApiPolling(true);
     }
 
     GM_addValueChangeListener(API_KEY_STORAGE, function(name, old_value, new_value, remote) {
         if (remote) {
             apiKey = String(new_value || '');
             apiState = { drugEnd: 0, energyFullAt: 0, fetchedAt: 0, error: '', loading: false };
-            startApiPolling();
+            startApiPolling(false);
         }
     });
 
-    function startApiPolling() {
+    GM_addValueChangeListener(API_CACHE_STORAGE, function(name, old_value, new_value, remote) {
+        if (remote && new_value) adoptApiCache(new_value);
+    });
+
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) refreshApiState(false);
+    });
+
+    function startApiPolling(force) {
         if (apiTimer) clearInterval(apiTimer);
         apiTimer = null;
         if (!apiKey) return;
-        refreshApiState();
-        apiTimer = setInterval(refreshApiState, API_REFRESH_MS);
+        refreshApiState(force);
+        apiTimer = setInterval(() => refreshApiState(false), API_REFRESH_MS);
     }
 
     function formatDuration(ms) {
@@ -218,6 +260,9 @@
     }
 
     function renderApiStatusHtml() {
+        if (apiState.error) {
+            return `<div style="font-size:10px; color:#f44336; margin-bottom:6px;">${apiState.error}</div>`;
+        }
         if (!apiKey) {
             return '<div style="font-size:10px; color:#aaa; margin-bottom:6px;">Add a Torn API key in ⚙️ to show drug cooldown and energy.</div>';
         }
@@ -524,6 +569,26 @@
         }, 1000);
     }
 
+    function getInsuranceDisplay() {
+        if (!jumpData.insuranceStartTime) return { text: 'Not Active', cls: '' };
+        const remaining = 3 * 24 * 60 * 60 * 1000 - (Date.now() - jumpData.insuranceStartTime);
+        if (remaining <= 0) return { text: 'EXPIRED', cls: 'mhj-expired' };
+        return { text: `${formatDuration(remaining)} left`, cls: 'mhj-ok' };
+    }
+
+    // Updates only the ticking text so the panel (and its scroll position) is not rebuilt every second.
+    function tickTimers() {
+        if (jumpData.isMinimized || currentView !== 'main') return;
+        const insEl = document.getElementById('mhj-ins-status');
+        const apiEl = document.getElementById('mhj-api-status');
+        if (insEl) {
+            const ins = getInsuranceDisplay();
+            insEl.className = ins.cls;
+            insEl.textContent = ins.text;
+        }
+        if (apiEl) apiEl.innerHTML = renderApiStatusHtml();
+    }
+
     function updateUI() {
         if (timerInterval) clearInterval(timerInterval);
         applyPositions();
@@ -642,24 +707,8 @@
             return;
         }
 
-        const now = Date.now();
-        const threeDaysMs = 3 * 24 * 60 * 60 * 1000;
-        let insuranceStatusText = 'Not Active', insuranceClass = '';
-
-        if (jumpData.insuranceStartTime) {
-            const elapsed = now - jumpData.insuranceStartTime;
-            const remaining = threeDaysMs - elapsed;
-            if (remaining > 0) {
-                const hoursLeft = Math.floor(remaining / (1000 * 60 * 60));
-                const minsLeft = Math.floor((remaining % (1000 * 60 * 60)) / (1000 * 60));
-                const secsLeft = Math.floor((remaining % (1000 * 60)) / 1000);
-                insuranceStatusText = `${hoursLeft}h ${String(minsLeft).padStart(2, '0')}m ${String(secsLeft).padStart(2, '0')}s left`;
-                insuranceClass = 'mhj-ok';
-            } else {
-                insuranceStatusText = 'EXPIRED';
-                insuranceClass = 'mhj-expired';
-            }
-        }
+        const insurance = getInsuranceDisplay();
+        const prevListScroll = (winEl.querySelector && winEl.querySelector('.mhj-step-list')) ? winEl.querySelector('.mhj-step-list').scrollTop : 0;
 
         winEl.innerHTML = `
             <div id="mhj-header">
@@ -674,12 +723,12 @@
             </div>
             <div class="mhj-row">
                 <span>OD Insurance:</span>
-                <span class="${insuranceClass}">${insuranceStatusText}</span>
+                <span id="mhj-ins-status" class="${insurance.cls}">${insurance.text}</span>
             </div>
             <div class="mhj-row" style="font-size:11px; background:#222; padding:4px; border-radius:4px;">
                 <span>🎒 Stock: <b style="color:#4caf50">${totalCandies}</b> Candies | <b style="color:#4caf50">${jumpData.stock.xanax}</b> Xan | <b style="color:#4caf50">${jumpData.stock.ecstasy}</b> E</span>
             </div>
-            ${renderApiStatusHtml()}
+            <div id="mhj-api-status">${renderApiStatusHtml()}</div>
             ${scanStatusMsg ? `<div style="font-size:10px; color:#ffca28; margin-bottom:6px;">${scanStatusMsg}</div>` : ''}
             <div class="mhj-step-body open" style="margin:6px 0;">
                 <b>Before-bed pre-setup:</b> let energy refill to full, take 1 Xanax, then sleep. Xanax cooldown is 360–480 minutes; wait until Torn shows it has cleared before the next drug.
@@ -778,8 +827,11 @@
             }
         };
 
+        const listEl = winEl.querySelector('.mhj-step-list');
+        if (listEl) listEl.scrollTop = prevListScroll;
+
         if (jumpData.insuranceStartTime || apiKey) {
-            timerInterval = setInterval(updateUI, 1000);
+            timerInterval = setInterval(tickTimers, 1000);
         }
     }
 
