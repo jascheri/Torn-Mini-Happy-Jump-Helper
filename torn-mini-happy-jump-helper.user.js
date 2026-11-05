@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Mini Happy Jump Assistant
 // @namespace    https://github.com/jascheri/Torn-Mini-Happy-Jump-Helper
-// @version      9.15
+// @version      9.16
 // @description  Mini Happy Jump planner with inventory tracking, cooldown guidance, and multi-tab sync.
 // @author       You
 // @match        https://www.torn.com/*
@@ -52,13 +52,15 @@
 		progress: { candy: 0, xan: 0, ext: 0 }
 	};
 
+	const XANAX_MARKET_URL = 'https://www.torn.com/page.php?sid=ItemMarket#/market/view=search&itemID=206&itemName=Xanax&itemType=Drug';
+
 	const JUMP_STEPS = [
 		{
 			title: 'Before Bed: Xanax',
 			candies: 0,
 			xanax: 1,
 			ecstasy: 0,
-			instructions: ['Wait for energy to refill to full.', 'Take Xanax, then sleep.']
+			instructions: []
 		},
 		{
 			title: 'D1 7am: Full Jump',
@@ -379,6 +381,9 @@
 			const fresh = {
 				drugEnd: now + (Number(cd.cooldowns.drug) || 0) * 1000,
 				energyFullAt: now + (Number(bars.bars.energy.full_time) || 0) * 1000,
+				energyMax: Number(bars.bars.energy.maximum) || 0,
+				energyInc: Number(bars.bars.energy.increment) || 0,
+				energyInt: Number(bars.bars.energy.interval) || 0,
 				fetchedAt: now
 			};
 			GM_setValue(API_CACHE_STORAGE, fresh);
@@ -403,6 +408,9 @@
 	function adoptApiCache(cache) {
 		apiState.drugEnd = cache.drugEnd;
 		apiState.energyFullAt = cache.energyFullAt;
+		apiState.energyMax = cache.energyMax || 0;
+		apiState.energyInc = cache.energyInc || 0;
+		apiState.energyInt = cache.energyInt || 0;
 		apiState.fetchedAt = cache.fetchedAt;
 		apiState.error = '';
 		tickTimers();
@@ -517,6 +525,26 @@
 			return '<div style="font-size:10px; color:#aaa; margin-bottom:6px;">Add a Torn API key in ⚙️ to show drug cooldown and energy beside the current step.</div>';
 		}
 		return '';
+	}
+
+	// Colored "Wait for full energy" line: red while refilling, green once full. Current energy is estimated from the last bars fetch.
+	function energyLineHtml() {
+		const red = '#f44336',
+			green = '#4caf50';
+		if (!apiKey || !apiState.fetchedAt) {
+			return `<span style="color:${red}">Wait for full energy: <span style="font-size:10px;">add an API key in ⚙️</span></span>`;
+		}
+		const left = apiState.energyFullAt - Date.now();
+		const max = apiState.energyMax;
+		if (left <= 0) {
+			return `<span style="color:${green}">Wait for full energy: ${max ? `${max} / ${max} ` : ''}— Full, ready ✔</span>`;
+		}
+		let cur = '';
+		if (max && apiState.energyInc && apiState.energyInt) {
+			const est = Math.max(0, max - Math.ceil(left / 1000 / apiState.energyInt) * apiState.energyInc);
+			cur = `${est} / ${max} `;
+		}
+		return `<span style="color:${red}">Wait for full energy: ${cur}— full in ${formatDuration(left)}</span>`;
 	}
 
 	// kind: 'xan' shows the shared drug cooldown plus energy-full time; 'ext' shows the drug cooldown only.
@@ -852,6 +880,9 @@
 		}
 		if (apiEl) apiEl.innerHTML = renderApiStatusHtml();
 		if (winEl.querySelectorAll) {
+			winEl.querySelectorAll('[data-mhj-energy]').forEach((el) => {
+				el.innerHTML = energyLineHtml();
+			});
 			winEl.querySelectorAll('[data-mhj-cd]').forEach((el) => {
 				el.innerHTML = cooldownBadgeHtml(el.getAttribute('data-mhj-cd'));
 			});
@@ -1154,6 +1185,18 @@
                     <div class="mhj-progress-note" style="color:${lowStock ? '#f44336' : '#888'}">${stock} in stock${lowStock ? ' (not enough)' : ''}</div>`;
 		};
 
+		const xanaxLines = () => {
+			const done = stepProgress(jumpData.progress.xan, step.xanax);
+			const complete = done >= step.xanax;
+			const short = !isDone && !complete && jumpData.stock.xanax < step.xanax - done;
+			const link = short ? ` <a href="${XANAX_MARKET_URL}" target="_blank" rel="noopener" style="color:#f44336; text-decoration:underline;">(Not enough Xanax)</a>` : '';
+			const energy = isActive && !complete ? `<div class="mhj-action-line" data-mhj-energy="1">${energyLineHtml()}</div>` : '';
+			return `${energy}<div class="mhj-action-line" style="color:${complete ? '#4caf50' : '#f44336'}">
+                        <span>• Take Xanax${link}</span>
+                        <span>${done} / ${step.xanax}</span>
+                    </div>`;
+		};
+
 		return `
             <div class="mhj-step-container">
                 <div id="mhj-step-hdr-${stepNum}" class="mhj-step-header ${isActive ? 'mhj-step-active-header' : ''}">
@@ -1162,7 +1205,7 @@
                 </div>
                 <div class="mhj-step-body ${isOpen ? 'open' : ''}">
                     ${step.candies > 0 ? progressLine('Candy', jumpData.progress.candy, step.candies, totalCandies) + candySubsHtml : ''}
-                    ${step.xanax > 0 ? progressLine('Xanax', jumpData.progress.xan, step.xanax, jumpData.stock.xanax, '', 'xan') : ''}
+                    ${step.xanax > 0 ? xanaxLines() : ''}
                     ${step.ecstasy > 0 ? progressLine('Ecstasy', jumpData.progress.ext, step.ecstasy, jumpData.stock.ecstasy, 'margin-top:4px;', 'ext') : ''}
                     <div style="margin-top:5px; color:#ccc;">
                         ${step.instructions.map((instruction) => `<div>• ${instruction}</div>`).join('')}
