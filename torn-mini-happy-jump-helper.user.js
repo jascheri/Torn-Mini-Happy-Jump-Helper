@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Mini Happy Jump Assistant
 // @namespace    https://github.com/jascheri/Torn-Mini-Happy-Jump-Helper
-// @version      9.12
+// @version      9.13
 // @description  Mini Happy Jump planner with inventory tracking, cooldown guidance, and multi-tab sync.
 // @author       You
 // @match        https://www.torn.com/*
@@ -49,7 +49,8 @@
 		lastScraped: null,
 		itemMap: {},
 		counters: null,
-		pending: { xan: 0, ext: 0, candies: {} }
+		pending: { xan: 0, ext: 0, candies: {} },
+		progress: { candy: 0, xan: 0, ext: 0 }
 	};
 
 	const JUMP_STEPS = [
@@ -98,9 +99,13 @@
 		const pending = stored.pending && typeof stored.pending === 'object' ? stored.pending : {};
 		const counters = stored.counters && Number.isFinite(stored.counters.xan) && Number.isFinite(stored.counters.ext) && Number.isFinite(stored.counters.candy) ? { xan: stored.counters.xan, ext: stored.counters.ext, candy: stored.counters.candy } : null;
 
+		const progress = stored.progress && typeof stored.progress === 'object' ? stored.progress : {};
+		const count = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
+
 		return {
 			...DEFAULT_DATA,
 			...stored,
+			progress: { candy: count(progress.candy), xan: count(progress.xan), ext: count(progress.ext) },
 			itemMap: stored.itemMap && typeof stored.itemMap === 'object' && !Array.isArray(stored.itemMap) ? { ...stored.itemMap } : {},
 			counters,
 			pending: {
@@ -156,10 +161,13 @@
 		if (kind === 'xan') {
 			jumpData.stock.xanax = Math.max(0, jumpData.stock.xanax - 1);
 			p.xan += 1;
+			jumpData.progress.xan += 1;
 		} else if (kind === 'ext') {
 			jumpData.stock.ecstasy = Math.max(0, jumpData.stock.ecstasy - 1);
 			p.ext += 1;
+			jumpData.progress.ext += 1;
 		} else {
+			jumpData.progress.candy += 1;
 			if (jumpData.stock.candies[candyName] > 0) {
 				jumpData.stock.candies[candyName] -= 1;
 				if (jumpData.stock.candies[candyName] === 0) delete jumpData.stock.candies[candyName];
@@ -188,12 +196,17 @@
 			const extAdj = Math.max(0, now.ext - prev.ext) - p.ext;
 			jumpData.stock.xanax = Math.max(0, jumpData.stock.xanax - xanAdj);
 			jumpData.stock.ecstasy = Math.max(0, jumpData.stock.ecstasy - extAdj);
+			// Uses the page hook missed (e.g. mobile app) still count toward the current step's progress.
+			jumpData.progress.xan += Math.max(0, xanAdj);
+			jumpData.progress.ext += Math.max(0, extAdj);
 
 			const hookCandies = Object.values(p.candies).reduce((a, b) => a + b, 0);
 			const candyAdj = Math.max(0, now.candy - prev.candy) - hookCandies;
 			if (candyAdj > 0) {
 				deductCandies(candyAdj);
+				jumpData.progress.candy += candyAdj;
 			} else if (candyAdj < 0) {
+				jumpData.progress.candy = Math.max(0, jumpData.progress.candy + candyAdj);
 				let refund = -candyAdj;
 				for (const [cName, n] of Object.entries(p.candies)) {
 					const give = Math.min(n, refund);
@@ -670,6 +683,19 @@
             border-left: 2px solid #444;
             margin: 2px 0;
         }
+        .mhj-progress {
+            height: 6px;
+            background: #333;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+        .mhj-progress-fill {
+            height: 100%;
+            background: #ffb300;
+            transition: width 0.3s ease;
+        }
+        .mhj-progress-fill.complete { background: #4caf50; }
+        .mhj-progress-note { font-size: 9px; margin: 1px 0 3px 0; }
         .mhj-ok { color: #4caf50; font-weight: bold; }
         .mhj-expired { color: #f44336; font-weight: bold; }
     `;
@@ -1074,6 +1100,7 @@
 			}
 			const completedCycle = jumpData.step === JUMP_STEPS.length;
 			jumpData.step = (jumpData.step % JUMP_STEPS.length) + 1;
+			jumpData.progress = { candy: 0, xan: 0, ext: 0 };
 			if (completedCycle) {
 				jumpData.preSetupXanaxUsed = false;
 				jumpData.insuranceStartTime = null;
@@ -1113,9 +1140,6 @@
 		const isDone = stepNum < currentStep;
 
 		const totalCandies = getTotalCandyCount();
-		const candyColor = totalCandies < step.candies ? '#f44336' : '#4caf50';
-		const xanColor = jumpData.stock.xanax < step.xanax ? '#f44336' : '#4caf50';
-		const extColor = jumpData.stock.ecstasy < step.ecstasy ? '#f44336' : '#4caf50';
 
 		let isOpen = isActive;
 		if (manualToggles[stepNum] !== undefined) {
@@ -1131,6 +1155,20 @@
 			candySubsHtml = `<div class="mhj-candy-sub" style="color:#f44336">• No candies in stock</div>`;
 		}
 
+		const stepProgress = (used, need) => (isDone ? need : isActive ? Math.min(used, need) : 0);
+		const progressLine = (label, used, need, stock, extraStyle) => {
+			const done = stepProgress(used, need);
+			const pct = Math.round((done / need) * 100);
+			const complete = done >= need;
+			const lowStock = !isDone && stock < need - done;
+			return `<div class="mhj-action-line" style="${extraStyle || ''}">
+                        <span>• ${label}</span>
+                        <span style="color:${complete ? '#4caf50' : '#fff'}">${done} / ${need} used</span>
+                    </div>
+                    <div class="mhj-progress"><div class="mhj-progress-fill ${complete ? 'complete' : ''}" style="width:${pct}%"></div></div>
+                    <div class="mhj-progress-note" style="color:${lowStock ? '#f44336' : '#888'}">${stock} in stock${lowStock ? ' (not enough)' : ''}</div>`;
+		};
+
 		return `
             <div class="mhj-step-container">
                 <div id="mhj-step-hdr-${stepNum}" class="mhj-step-header ${isActive ? 'mhj-step-active-header' : ''}">
@@ -1138,19 +1176,10 @@
                     <span style="font-size:9px; color:#aaa;">${isOpen ? '▲' : '▼'}</span>
                 </div>
                 <div class="mhj-step-body ${isOpen ? 'open' : ''}">
-                    <div class="mhj-action-line">
-                        <span>• Candy needed</span>
-                        <span style="color:${candyColor}">(${totalCandies} / ${step.candies})</span>
-                    </div>
+                    ${progressLine('Candy', jumpData.progress.candy, step.candies, totalCandies)}
                     ${candySubsHtml}
-                    ${step.xanax > 0 ? `<div class="mhj-action-line">
-                        <span>• Xanax needed</span>
-                        <span style="color:${xanColor}">(${jumpData.stock.xanax} / ${step.xanax})</span>
-                    </div>` : ''}
-                    ${step.ecstasy > 0 ? `<div class="mhj-action-line" style="margin-top:4px;">
-                        <span>• Ecstasy needed</span>
-                        <span style="color:${extColor}">(${jumpData.stock.ecstasy} / ${step.ecstasy})</span>
-                    </div>` : ''}
+                    ${step.xanax > 0 ? progressLine('Xanax', jumpData.progress.xan, step.xanax, jumpData.stock.xanax) : ''}
+                    ${step.ecstasy > 0 ? progressLine('Ecstasy', jumpData.progress.ext, step.ecstasy, jumpData.stock.ecstasy, 'margin-top:4px;') : ''}
                     <div style="margin-top:5px; color:#ccc;">
                         ${step.instructions.map((instruction) => `<div>• ${instruction}</div>`).join('')}
                     </div>
