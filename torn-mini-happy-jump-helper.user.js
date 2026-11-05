@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Mini Happy Jump Assistant
 // @namespace    https://github.com/jascheri/Torn-Mini-Happy-Jump-Helper
-// @version      9.14
+// @version      9.15
 // @description  Mini Happy Jump planner with inventory tracking, cooldown guidance, and multi-tab sync.
 // @author       You
 // @match        https://www.torn.com/*
@@ -35,7 +35,6 @@
 		insuranceStartTime: null,
 		currentDay: 1,
 		step: 1,
-		preSetupXanaxUsed: false,
 		isMinimized: true,
 		iconX: null,
 		iconY: null,
@@ -54,6 +53,13 @@
 	};
 
 	const JUMP_STEPS = [
+		{
+			title: 'Before Bed: Xanax',
+			candies: 0,
+			xanax: 1,
+			ecstasy: 0,
+			instructions: ['Wait for energy to refill to full.', 'Take Xanax, then sleep.']
+		},
 		{
 			title: 'D1 7am: Full Jump',
 			candies: 48,
@@ -114,7 +120,6 @@
 				candies: pending.candies && typeof pending.candies === 'object' && !Array.isArray(pending.candies) ? { ...pending.candies } : {}
 			},
 			step: Number.isInteger(stored.step) && stored.step >= 1 && stored.step <= JUMP_STEPS.length ? stored.step : 1,
-			preSetupXanaxUsed: stored.preSetupXanaxUsed === true,
 			stock: {
 				xanax: Number.isInteger(stock.xanax) && stock.xanax >= 0 ? stock.xanax : 0,
 				ecstasy: Number.isInteger(stock.ecstasy) && stock.ecstasy >= 0 ? stock.ecstasy : 0,
@@ -1021,13 +1026,6 @@
             </div>
             <div id="mhj-api-status">${renderApiStatusHtml()}</div>
             ${scanStatusMsg ? `<div style="font-size:10px; color:#ffca28; margin-bottom:6px;">${scanStatusMsg}</div>` : ''}
-            <div class="mhj-step-body open" style="margin:6px 0;">
-                <b>Before-bed pre-setup:</b> let energy refill to full, take 1 Xanax, then sleep. Xanax cooldown is 360–480 minutes; wait until Torn shows it has cleared before the next drug.
-                <button class="mhj-btn" id="mhj-pre-setup" ${jumpData.preSetupXanaxUsed ? 'disabled' : ''}>
-                    ${jumpData.preSetupXanaxUsed ? 'Bedtime Xanax Marked Used' : `Mark Bedtime Xanax Used (${jumpData.stock.xanax} / 1)`}
-                </button>
-            </div>
-
             <div class="mhj-step-list">
                 ${JUMP_STEPS.map((step, index) => renderAccordionStep(step, index + 1, jumpData.step)).join('')}
             </div>
@@ -1072,20 +1070,6 @@
 			updateUI();
 		};
 
-		document.getElementById('mhj-pre-setup').onclick = () => {
-			if (jumpData.preSetupXanaxUsed) return;
-			if (!autoTrack) {
-				if (jumpData.stock.xanax < 1) {
-					alert('Not enough Xanax in tracked stock. Sync or update your stock before marking the pre-setup.');
-					return;
-				}
-				jumpData.stock.xanax -= 1;
-			}
-			jumpData.preSetupXanaxUsed = true;
-			saveData();
-			updateUI();
-		};
-
 		document.getElementById('mhj-next-btn').onclick = () => {
 			const step = JUMP_STEPS[jumpData.step - 1];
 			// With auto-tracking on, stock is already deducted as items are used, so completing only advances the step.
@@ -1103,7 +1087,6 @@
 			jumpData.step = (jumpData.step % JUMP_STEPS.length) + 1;
 			jumpData.progress = { candy: 0, xan: 0, ext: 0 };
 			if (completedCycle) {
-				jumpData.preSetupXanaxUsed = false;
 				jumpData.insuranceStartTime = null;
 			}
 			manualToggles = {};
@@ -1178,8 +1161,7 @@
                     <span style="font-size:9px; color:#aaa;">${isOpen ? '▲' : '▼'}</span>
                 </div>
                 <div class="mhj-step-body ${isOpen ? 'open' : ''}">
-                    ${progressLine('Candy', jumpData.progress.candy, step.candies, totalCandies)}
-                    ${candySubsHtml}
+                    ${step.candies > 0 ? progressLine('Candy', jumpData.progress.candy, step.candies, totalCandies) + candySubsHtml : ''}
                     ${step.xanax > 0 ? progressLine('Xanax', jumpData.progress.xan, step.xanax, jumpData.stock.xanax, '', 'xan') : ''}
                     ${step.ecstasy > 0 ? progressLine('Ecstasy', jumpData.progress.ext, step.ecstasy, jumpData.stock.ecstasy, 'margin-top:4px;', 'ext') : ''}
                     <div style="margin-top:5px; color:#ccc;">
